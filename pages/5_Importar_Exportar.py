@@ -6,7 +6,6 @@ import streamlit as st
 import db
 from common import ejecutar_con_manejo, seleccionar_usuario_actual
 
-st.set_page_config(page_title="Importar/Exportar - Bitacoras-Entregas", layout="wide")
 db.init_db()
 
 usuario_id = seleccionar_usuario_actual()
@@ -14,6 +13,7 @@ usuario_id = seleccionar_usuario_actual()
 st.title("Importar / Exportar")
 
 st.subheader("Exportar bitacora consolidada")
+st.caption("Un documento sin incidencias aparece una sola vez; uno con varias aparece repetido, una fila por incidencia.")
 
 consolidado = db.consultar(
     """
@@ -25,24 +25,20 @@ consolidado = db.consultar(
         d.numero_documento,
         d.fecha_documento,
         d.estado_documento,
-        d.estado_entrega,
-        p.nombre AS producto,
-        dp.cantidad_solicitada,
-        dp.cantidad_despachada,
-        dp.cantidad_entregada,
-        (dp.cantidad_despachada - dp.cantidad_entregada) AS diferencia,
-        dp.motivo_entrega_parcial,
-        p.unidad,
-        l.lote,
-        l.fecha_vencimiento,
-        l.cantidad_lote
+        i.producto_codigo,
+        i.producto_descripcion,
+        i.tipo_incidencia,
+        i.cantidad_afectada,
+        i.lote,
+        i.fecha_vencimiento,
+        i.motivo_detalle,
+        i.accion_tomada,
+        i.estado_resolucion
     FROM documento d
     JOIN viaje_establecimiento ve ON ve.id = d.viaje_establecimiento_id
     JOIN viaje v ON v.id = ve.viaje_id
     JOIN establecimiento e ON e.id = ve.establecimiento_id
-    LEFT JOIN documento_producto dp ON dp.documento_id = d.id AND dp.activo = 1
-    LEFT JOIN producto p ON p.id = dp.producto_id
-    LEFT JOIN documento_producto_lote l ON l.documento_producto_id = dp.id AND l.activo = 1
+    LEFT JOIN incidencia_producto i ON i.documento_id = d.id AND i.activo = 1
     ORDER BY v.codigo, e.nombre, d.fecha_creacion
     """
 )
@@ -65,15 +61,8 @@ col2.download_button(
 )
 
 st.divider()
-st.subheader("Importar catalogo desde CSV")
-
-catalogo = st.selectbox("Catalogo a importar", ["establecimiento", "producto"])
-columnas_por_catalogo = {
-    "establecimiento": ["codigo", "nombre", "tipo", "direccion"],
-    "producto": ["nombre", "sku", "unidad"],
-}
-columnas_esperadas = columnas_por_catalogo[catalogo]
-st.caption(f"El CSV debe tener las columnas: {', '.join(columnas_esperadas)} (solo 'nombre' es obligatoria).")
+st.subheader("Importar establecimientos desde CSV")
+st.caption("El CSV debe tener las columnas: codigo, nombre, tipo, direccion (solo 'nombre' es obligatoria).")
 
 archivo = st.file_uploader("Archivo CSV", type=["csv"])
 if archivo is not None:
@@ -86,7 +75,8 @@ if archivo is not None:
             st.error("El CSV debe tener una columna 'nombre'.")
         else:
             st.dataframe(df_importar, use_container_width=True, hide_index=True)
-            if st.button(f"Importar {len(df_importar)} filas a {catalogo}"):
+            if st.button(f"Importar {len(df_importar)} filas a establecimiento"):
+                columnas_esperadas = ["codigo", "nombre", "tipo", "direccion"]
                 creados = 0
                 omitidos = []
                 for numero_fila, fila in df_importar.iterrows():
@@ -99,12 +89,12 @@ if archivo is not None:
                             continue
                         valor = fila.get(col)
                         datos[col] = None if pd.isna(valor) else str(valor).strip()
-                    _, ok = ejecutar_con_manejo(db.insertar, catalogo, datos, usuario_id)
+                    _, ok = ejecutar_con_manejo(db.insertar, "establecimiento", datos, usuario_id)
                     if ok:
                         creados += 1
                     else:
                         omitidos.append(f"fila {numero_fila + 2} ('{nombre}')")
-                st.success(f"Se importaron {creados} de {len(df_importar)} filas a {catalogo}.")
+                st.success(f"Se importaron {creados} de {len(df_importar)} filas a establecimiento.")
                 if omitidos:
-                    st.warning("Se omitieron por error de integridad (ej. codigo/SKU duplicado): " + ", ".join(omitidos))
+                    st.warning("Se omitieron por error de integridad (ej. codigo duplicado): " + ", ".join(omitidos))
                 st.rerun()

@@ -23,12 +23,46 @@ DB_PATH = BASE_DIR / "data" / "bitacora.db"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 
 ESTADOS_VIAJE = ["Planificado", "En curso", "Finalizado", "Cancelado"]
-ESTADOS_DOCUMENTO = ["Emitido", "Corregido", "Anulado"]
-ESTADOS_ENTREGA = ["Pendiente", "Entregado", "Parcial", "Rechazado", "Devuelta"]
+
+# estado_documento unifica en un solo campo el ciclo administrativo del
+# documento y el resultado de la entrega (antes eran dos columnas separadas).
+ESTADOS_DOCUMENTO = [
+    "Pendiente",
+    "Cargado",
+    "Entregado",
+    "Entregado con observaciones",
+    "Entrega parcial",
+    "No entregado",
+    "Rechazado",
+    "Devuelto",
+    "Anulado",
+]
+
+# Motivo de la incidencia detectada en destino (independiente del estado del
+# documento). Solo se registra un producto cuando hay una incidencia.
+TIPOS_INCIDENCIA = [
+    "Faltante",
+    "Sobrante",
+    "Deteriorado",
+    "Rechazado",
+    "Vencimiento próximo",
+    "Vencido",
+    "Error de lote",
+    "Producto incorrecto",
+    "Cantidad incorrecta",
+    "Problema de embalaje",
+    "Problema de cadena de frío",
+    "Otro",
+]
+
+# Ciclo de gestion de una incidencia, independiente de estado_documento.
+ESTADOS_INCIDENCIA = ["Abierta", "En gestión", "Resuelta", "Cerrada sin resolución"]
 
 # Lista blanca de tablas que pueden recibir escrituras dinamicas (insertar/
 # actualizar/anular). "auditoria" queda deliberadamente fuera: solo se
 # escribe desde `_registrar_auditoria`, nunca desde codigo de paginas.
+# documento_producto/documento_producto_lote quedaron fuera del MVP de
+# incidencias (ver schema.sql); no se referencian mas desde la aplicacion.
 TABLAS_PERMITIDAS = {
     "usuario",
     "establecimiento",
@@ -36,8 +70,7 @@ TABLAS_PERMITIDAS = {
     "viaje",
     "viaje_establecimiento",
     "documento",
-    "documento_producto",
-    "documento_producto_lote",
+    "incidencia_producto",
 }
 
 
@@ -206,76 +239,33 @@ def anular(tabla, registro_id, usuario_id, motivo, campo_estado=None, valor_anul
 
 
 def anular_documento(documento_id, usuario_id, motivo):
-    """Anula un documento aplicando las reglas de coherencia de negocio:
+    """Anula un documento (estado_documento -> 'Anulado'), aplicando la regla de
+    coherencia de negocio: no se puede anular directamente un documento cuyo
+    estado ya es 'Entregado'. Primero debe existir una correccion/reversa
+    trazable (cambiar el estado a, por ejemplo, 'Devuelto' o 'Rechazado' desde
+    el formulario de edicion del documento -- lo que ya registra usuario y
+    fecha/hora en `auditoria`) y recien despues anular el documento.
 
-    - No se puede anular un documento cuya entrega ya fue completada
-      (estado_entrega='Entregado'); primero hay que corregir/revertir ese
-      estado desde el formulario de edicion (por ejemplo a 'Devuelta' o
-      'Rechazado') y recien despues anular el documento.
-    - Al anular, las lineas de producto (`documento_producto`) que sigan
-      activas y sus lotes (`documento_producto_lote`) se dan de baja logica
-      en cascada, dejando su propio asiento de auditoria. Nada se borra:
-      una entrega completa, parcial, rechazada o devuelta se conserva
-      siempre para trazabilidad.
+    Las incidencias de producto del documento (`incidencia_producto`, si las
+    hay) NO se tocan: su ciclo de resolucion es independiente del estado del
+    documento al que pertenecen.
     """
-    if not usuario_id:
-        raise ErrorNegocio("Se requiere un usuario responsable para anular el documento.")
-    if not motivo or not motivo.strip():
-        raise ErrorNegocio("Se requiere un motivo para anular el documento.")
-    motivo = motivo.strip()
-
     conn = get_connection()
     try:
         fila = conn.execute(
-            "SELECT estado_documento, estado_entrega FROM documento WHERE id = ?", (documento_id,)
+            "SELECT estado_documento FROM documento WHERE id = ?", (documento_id,)
         ).fetchone()
         if fila is None:
             raise ErrorNegocio("El documento no existe.")
         if fila["estado_documento"] == "Anulado":
             raise ErrorNegocio("El documento ya esta anulado.")
-        if fila["estado_entrega"] == "Entregado":
+        if fila["estado_documento"] == "Entregado":
             raise ErrorNegocio(
-                "No se puede anular un documento con la entrega ya completada. Primero corrige "
-                "el estado de la entrega (por ejemplo a 'Devuelta' o 'Rechazado') desde el "
-                "formulario de edicion del documento, y luego anulalo."
+                "No se puede anular un documento ya Entregado. Primero registra una "
+                "correccion/reversa trazable (cambia el estado a, por ejemplo, 'Devuelto' o "
+                "'Rechazado' desde el formulario de edicion del documento) y luego anulalo."
             )
-
-        ahora = _now_utc()
-        conn.execute(
-            "UPDATE documento SET estado_documento = 'Anulado', fecha_modificacion = ?, "
-            "modificado_por = ? WHERE id = ?",
-            (ahora, usuario_id, documento_id),
-        )
-        _registrar_auditoria(conn, "documento", documento_id, "ANULACION", usuario_id, motivo)
-
-        lineas = conn.execute(
-            "SELECT id FROM documento_producto WHERE documento_id = ? AND activo = 1", (documento_id,)
-        ).fetchall()
-        for linea in lineas:
-            dp_id = linea["id"]
-            conn.execute(
-                "UPDATE documento_producto SET activo = 0, fecha_modificacion = ?, modificado_por = ? "
-                "WHERE id = ?",
-                (ahora, usuario_id, dp_id),
-            )
-            detalle_cascada = f"Baja en cascada por anulacion del documento #{documento_id}: {motivo}"
-            _registrar_auditoria(conn, "documento_producto", dp_id, "ANULACION", usuario_id, detalle_cascada)
-
-            lotes = conn.execute(
-                "SELECT id FROM documento_producto_lote WHERE documento_producto_id = ? AND activo = 1",
-                (dp_id,),
-            ).fetchall()
-            for lote in lotes:
-                lote_id = lote["id"]
-                conn.execute(
-                    "UPDATE documento_producto_lote SET activo = 0, fecha_modificacion = ?, "
-                    "modificado_por = ? WHERE id = ?",
-                    (ahora, usuario_id, lote_id),
-                )
-                _registrar_auditoria(
-                    conn, "documento_producto_lote", lote_id, "ANULACION", usuario_id, detalle_cascada
-                )
-
-        conn.commit()
     finally:
         conn.close()
+
+    anular("documento", documento_id, usuario_id, motivo, campo_estado="estado_documento", valor_anulado="Anulado")

@@ -3,7 +3,6 @@ import streamlit as st
 import db
 from common import ejecutar_con_manejo, seleccionar_por_id, seleccionar_usuario_actual
 
-st.set_page_config(page_title="Viajes - Bitacoras-Entregas", layout="wide")
 db.init_db()
 
 usuario_id = seleccionar_usuario_actual()

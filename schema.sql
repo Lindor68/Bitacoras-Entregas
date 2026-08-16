@@ -4,6 +4,14 @@
 -- Todos los timestamps se guardan en UTC (datetime('now') de SQLite ya es UTC;
 -- el codigo Python usa datetime.now(timezone.utc) para ser consistente). La
 -- conversion a hora local se hace unicamente al mostrar datos en la UI.
+--
+-- NOTA (MVP incidencias): documento_producto y documento_producto_lote
+-- quedaron fuera del esquema activo -- el documento/folio es la unidad
+-- principal de seguimiento, y el detalle de producto solo se registra
+-- cuando hay una incidencia (ver incidencia_producto). Si una base de datos
+-- existente (data/bitacora.db) todavia tiene esas tablas de una version
+-- anterior, no se tocan ni se borran: simplemente esta aplicacion no las
+-- referencia mas.
 
 PRAGMA foreign_keys = ON;
 
@@ -35,8 +43,9 @@ CREATE TABLE IF NOT EXISTS establecimiento (
     modificado_por      INTEGER REFERENCES usuario(id)
 );
 
--- El nombre NO es identificador unico (puede repetirse); el SKU, si existe,
--- si debe ser unico.
+-- Catalogo de productos: se mantiene, pero en el MVP de incidencias no es
+-- requisito previo de nada (la pagina que lo administra esta oculta del
+-- menu principal). incidencia_producto NO tiene FK hacia esta tabla.
 CREATE TABLE IF NOT EXISTS producto (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     nombre              TEXT NOT NULL,
@@ -51,8 +60,10 @@ CREATE TABLE IF NOT EXISTS producto (
 
 -- ---------------------------------------------------------------------
 -- Operacional
--- Jerarquia: viaje -> establecimientos (varios) -> documentos (varios) ->
---            productos (varios) -> lotes (uno o varios)
+-- Jerarquia: viaje -> establecimientos (varios) -> documentos/folios
+--            (varios) -> resultado de entrega (estado_documento) ->
+--            incidencias de producto (cero, una o varias, solo si hay
+--            discrepancia detectada en destino).
 -- ---------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS viaje (
@@ -82,52 +93,53 @@ CREATE TABLE IF NOT EXISTS viaje_establecimiento (
     modificado_por      INTEGER REFERENCES usuario(id)
 );
 
--- 1 establecimiento visitado -> varios documentos.
+-- El documento/folio es la unidad principal de seguimiento. estado_documento
+-- unifica en un solo campo tanto el ciclo administrativo como el resultado
+-- de la entrega (antes eran dos columnas separadas: estado_documento +
+-- estado_entrega).
 CREATE TABLE IF NOT EXISTS documento (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
     viaje_establecimiento_id INTEGER NOT NULL REFERENCES viaje_establecimiento(id),
     tipo_documento          TEXT NOT NULL,
     numero_documento        TEXT,
     fecha_documento         TEXT,
-    estado_documento        TEXT NOT NULL DEFAULT 'Emitido'
-                                CHECK (estado_documento IN ('Emitido', 'Corregido', 'Anulado')),
-    estado_entrega          TEXT NOT NULL DEFAULT 'Pendiente'
-                                CHECK (estado_entrega IN ('Pendiente', 'Entregado', 'Parcial', 'Rechazado', 'Devuelta')),
+    estado_documento        TEXT NOT NULL DEFAULT 'Pendiente'
+                                CHECK (estado_documento IN (
+                                    'Pendiente', 'Cargado', 'Entregado', 'Entregado con observaciones',
+                                    'Entrega parcial', 'No entregado', 'Rechazado', 'Devuelto', 'Anulado'
+                                )),
     fecha_creacion          TEXT NOT NULL DEFAULT (datetime('now')),
     fecha_modificacion      TEXT NOT NULL DEFAULT (datetime('now')),
     creado_por              INTEGER REFERENCES usuario(id),
     modificado_por          INTEGER REFERENCES usuario(id)
 );
 
--- 1 documento -> varios productos. Cantidades desagregadas para poder
--- distinguir lo pedido, lo despachado y lo efectivamente entregado; la
--- diferencia (despachado - entregado) se calcula en las consultas, no se
--- almacena, para evitar un valor derivado que pueda desincronizarse.
-CREATE TABLE IF NOT EXISTS documento_producto (
+-- Incidencia de producto: SOLO se registra cuando hay una discrepancia
+-- detectada en destino (faltante, sobrante, vencido, etc.). Un documento
+-- puede tener cero, una o varias. El producto se describe en texto libre
+-- (producto_codigo/producto_descripcion) -- NO hay FK al catalogo
+-- `producto`, porque no se exige precargar productos para registrar una
+-- incidencia. estado_resolucion es independiente del estado_documento del
+-- documento al que pertenece.
+CREATE TABLE IF NOT EXISTS incidencia_producto (
     id                      INTEGER PRIMARY KEY AUTOINCREMENT,
     documento_id            INTEGER NOT NULL REFERENCES documento(id),
-    producto_id             INTEGER NOT NULL REFERENCES producto(id),
-    cantidad_solicitada     REAL NOT NULL DEFAULT 0,
-    cantidad_despachada     REAL NOT NULL DEFAULT 0,
-    cantidad_entregada      REAL NOT NULL DEFAULT 0,
-    motivo_entrega_parcial  TEXT,
-    activo                  INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)),
-    fecha_creacion          TEXT NOT NULL DEFAULT (datetime('now')),
-    fecha_modificacion      TEXT NOT NULL DEFAULT (datetime('now')),
-    creado_por              INTEGER REFERENCES usuario(id),
-    modificado_por          INTEGER REFERENCES usuario(id)
-);
-
--- 1 linea de producto en un documento -> uno o varios lotes. Lote y
--- vencimiento pertenecen al detalle documental, NUNCA al catalogo de
--- productos (un mismo producto puede llegar en distintos lotes en
--- distintas entregas).
-CREATE TABLE IF NOT EXISTS documento_producto_lote (
-    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
-    documento_producto_id   INTEGER NOT NULL REFERENCES documento_producto(id),
-    lote                    TEXT NOT NULL,
+    producto_codigo         TEXT,
+    producto_descripcion    TEXT NOT NULL,
+    tipo_incidencia         TEXT NOT NULL
+                                CHECK (tipo_incidencia IN (
+                                    'Faltante', 'Sobrante', 'Deteriorado', 'Rechazado',
+                                    'Vencimiento próximo', 'Vencido', 'Error de lote',
+                                    'Producto incorrecto', 'Cantidad incorrecta',
+                                    'Problema de embalaje', 'Problema de cadena de frío', 'Otro'
+                                )),
+    cantidad_afectada       REAL NOT NULL DEFAULT 0,
+    lote                    TEXT,
     fecha_vencimiento       TEXT,
-    cantidad_lote           REAL NOT NULL DEFAULT 0,
+    motivo_detalle          TEXT NOT NULL,
+    accion_tomada           TEXT,
+    estado_resolucion       TEXT NOT NULL DEFAULT 'Abierta'
+                                CHECK (estado_resolucion IN ('Abierta', 'En gestión', 'Resuelta', 'Cerrada sin resolución')),
     activo                  INTEGER NOT NULL DEFAULT 1 CHECK (activo IN (0, 1)),
     fecha_creacion          TEXT NOT NULL DEFAULT (datetime('now')),
     fecha_modificacion      TEXT NOT NULL DEFAULT (datetime('now')),
@@ -152,7 +164,5 @@ CREATE TABLE IF NOT EXISTS auditoria (
 CREATE INDEX IF NOT EXISTS idx_viaje_establecimiento_viaje ON viaje_establecimiento(viaje_id);
 CREATE INDEX IF NOT EXISTS idx_viaje_establecimiento_establecimiento ON viaje_establecimiento(establecimiento_id);
 CREATE INDEX IF NOT EXISTS idx_documento_viaje_establecimiento ON documento(viaje_establecimiento_id);
-CREATE INDEX IF NOT EXISTS idx_documento_producto_documento ON documento_producto(documento_id);
-CREATE INDEX IF NOT EXISTS idx_documento_producto_producto ON documento_producto(producto_id);
-CREATE INDEX IF NOT EXISTS idx_documento_producto_lote_dp ON documento_producto_lote(documento_producto_id);
+CREATE INDEX IF NOT EXISTS idx_incidencia_producto_documento ON incidencia_producto(documento_id);
 CREATE INDEX IF NOT EXISTS idx_auditoria_tabla_registro ON auditoria(tabla, registro_id);
