@@ -11,3 +11,12 @@ desktop.ini
 # Env
 .env
 .env.local
+
+# Base de datos local (se genera en runtime, no se versiona)
+data/*.db
+data/*.db-journal
+
+# Python
+__pycache__/
+*.pyc
+.venv/
