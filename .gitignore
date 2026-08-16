@@ -12,9 +12,14 @@ desktop.ini
 .env
 .env.local
 
-# Base de datos local (se genera en runtime, no se versiona)
-data/*.db
-data/*.db-journal
+# Bases de datos locales, respaldos y archivos temporales de SQLite
+# (se generan en runtime / durante migraciones, nunca se versionan)
+*.bak
+*.bak*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 
 # Python
 __pycache__/
